@@ -1,0 +1,254 @@
+#!/bin/sh -efu
+
+cwd="$(readlink -ev "$0")"
+cwd="${cwd%/*}"
+
+. "$cwd/git-rh-sh-functions"
+
+show_help()
+{
+	cat <<-EOF
+	Usage: $PROG [options] [from-git-repo-dir] commit-ish
+
+	Options:
+
+	  --continue       Perform the merge and commit the result;
+	  --abort          Abort the current resolution process;
+	  --status         Show current resolution statue;
+	  --bugzilla=NUM   Set bugzilla number  (default '$bugnum');
+	  --brew=NUM       Set brew number      (default '$brewnum');
+	  -v, --verbose    Print a message for each action;
+	  -V, --version    Print program version and exit;
+	  -h, --help       Show this text and exit.
+
+	Environment:
+
+	RH_SOURCE_GITDIR   Specifies a git path to use.
+
+	Report bugs to author.
+
+	EOF
+	exit
+}
+
+show_hint()
+{
+	printf 'You can do:\n'
+	printf '  (use "git rh-backport --abort" to stop backporting)\n'
+	printf '  (use "git rh-backport --continue" to continue backporting)\n'
+}
+
+workdir=
+show_status()
+{
+	printf 'backport in progress\n'
+	show_hint
+}
+
+git_apply()
+{
+	git apply \
+		--reject \
+		--ignore-whitespace \
+		--recount \
+		"$@"
+}
+
+git_apply_filter()
+{
+	[ -n "$is_tty" ] ||
+		exec cat
+	exec sed -r \
+		-e "s|^Checking patch .*\.\.\.|${COLOR_BRIGHT_GREEN}&${COLOR_NORMAL}|" \
+		-e "s|^Hunk #.*|${COLOR_BRIGHT_BLUE}&${COLOR_NORMAL}|" \
+		-e "s|^(error:)(.*)|${COLOR_BRIGHT_RED}\1${COLOR_NORMAL}${COLOR_BRIGHT_BLACK}\2${COLOR_NORMAL}|"
+}
+
+TEMP=`getopt -n "$PROG" -o h,v,V -l abort,continue,status,test,bugzilla:,brew:,verbose,version,help,usage -- "$@"` ||
+	show_usage
+eval "set -- $TEMP"
+
+mode=
+while :; do
+	case "${1-}" in
+		--bugzilla) shift; bugnum="$1"   ;;
+		--brew)     shift; brewnum="$1"  ;;
+		--abort)    mode='abort'         ;;
+		--continue) mode='continue'      ;;
+		--status)   mode='status'        ;;
+		--test)     mode='test'          ;;
+		-v|--verbose)
+			verbose=-v
+			;;
+		-V|--version)
+			print_version
+			;;
+		-h|--help|--usage)
+			show_help
+			;;
+		--) shift
+			break
+			;;
+	esac
+	shift
+done
+
+src_gitdir="${RH_SOURCE_GITDIR-}"
+[ -n "$src_gitdir" ] || src_gitdir="$(git config redhat.source-gitdir 2>/dev/null ||:)"
+
+commitish=
+
+if [ -z "$mode" ] || [ "$mode" = 'test' ]; then
+	while :; do
+		case "$#" in
+			2)
+				src_gitdir="$(cd "$1"; git rev-parse --absolute-git-dir)"
+				shift
+				;;
+			1)
+				commitish="$1"
+				shift
+				;;
+			0)
+				[ -n "$commitish" ] ||
+					fatal "More arguments required"
+				break
+				;;
+			*)
+				fatal "Too many arguments"
+				;;
+		esac
+	done
+fi
+
+chdir_to_toplevel
+workdir="$PWD/.git/.backport"
+
+if [ -d "$workdir" ]; then
+	src_gitdir=
+	commitish=
+	subject=
+
+	. "$workdir/state"
+fi
+
+if [ ! -d "$src_gitdir" ]; then
+	rm -rf -- "$workdir"
+	fatal "source git repository required"
+fi
+
+case "$mode" in
+	'')
+		[ ! -d "$workdir" ] ||
+			fatal "You are already in the process of backporting the $commitish commit."
+		;;
+	'abort')
+		[ -d "$workdir" ] ||
+			fatal 'You are not backporting anything.'
+		git checkout -f
+		git clean -f
+		exec rm -rf -- "$workdir"
+		;;
+	'continue')
+		[ -d "$workdir" ] ||
+			fatal 'You are not backporting anything.'
+		;;
+	'status')
+		[ -d "$workdir" ] || {
+			message 'You are not backporting anything.'
+			exit 0
+		}
+		message "From git repository: $(format_message "$COLOR_MAGENTA" "$src_gitdir")"
+		message "You are in the process of backporting the $(format_message "$COLOR_YELLOW" "$commitish") commit."
+		message "Subject: $(format_message "$COLOR_BRIGHT_BLACK" "$subject")"
+		exec git status
+		;;
+	'test')
+		git --git-dir="$src_gitdir" show --pretty='format:' --patch "$commitish" |
+			git_apply --check 2>&1 |
+			git_apply_filter
+		exit
+		;;
+	*)
+		fatal "Unknown mode $mode."
+		;;
+esac
+
+if [ -z "$mode" ]; then
+	out="$(git diff-index --cached --name-only HEAD)"
+	if [ -n "$out" ]; then
+		printf 'Changed files found in the index:\n'
+		printf '  %s\n' $out
+		exit 1
+	fi
+
+	out="$(git diff --name-only &&
+	       git ls-files --directory --others --exclude-per-directory=.gitignore)"
+	if [ -n "$out" ]; then
+		printf 'Untracked or modified files found:\n'
+		printf '  %s\n' $out
+		exit 1
+	fi
+
+	mkdir -p -- "$workdir"
+
+	printf '%s\n' \
+		"src_gitdir='$src_gitdir'" \
+		"commitish='$commitish'"   \
+		"subject=\"$(git --git-dir="$src_gitdir" show --pretty='format:%s' --no-patch "$commitish" |sed -e 's/\"/\\&/g')\"" \
+		> "$workdir/state"
+fi
+
+git --git-dir="$src_gitdir" show --pretty='format:%C(auto,yellow)%h%Creset %s' --no-patch "$commitish"
+
+if [ ! -e "$workdir/commit" ]; then
+	{
+		printf '%s\n' \
+			"$(git --git-dir="$src_gitdir" show --no-patch --pretty='format:%s' "$commitish")" \
+			"" \
+			"Bugzilla: $bugnum" \
+			"Build info: $brew_host/brew/taskinfo?taskID=$brewnum" \
+			"Tested: selftests on x86 by me" \
+			"Upstream Status: Merged" \
+			""
+		git --git-dir="$src_gitdir" show --no-patch "$commitish"
+	} > "$workdir/commit"
+fi
+
+if [ ! -e "$workdir/patch" ]; then
+	git --git-dir="$src_gitdir" show --pretty='format:' --patch "$commitish" > "$workdir/patch"
+	{
+		git_apply "$workdir/patch" 2>&1 ||
+			:>"$workdir/error"
+	} |
+	git_apply_filter
+
+	if [ -f "$workdir/error" ]; then
+		rm -f -- "$workdir/error"
+		exit 1
+	fi
+
+	lsdiff --strip=1 -s "$workdir/patch" |
+	while read -r k v; do
+		case "$k" in
+			'!'|'+') sub=add ;;
+			'-')     sub=rm  ;;
+			*)
+				fatal "unexpected status=$k"
+				;;
+		esac
+		git "$sub" -f "$v"
+	done
+fi
+
+if ! git diff-index --cached --name-only HEAD | grep -qsc '^.'; then
+	printf '%s\n' \
+		'backport in progress' \
+		'No files to commit.'  \
+		''
+	show_hint
+	exit 1
+fi
+
+git commit -q -s --file="$workdir/commit"
+rm -rf -- "$workdir"

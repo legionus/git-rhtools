@@ -1,0 +1,131 @@
+#!/bin/sh -efu
+
+. shell-error
+. shell-args
+. shell-getopt
+
+cwd="$(readlink -ev "$0")"
+cwd="${cwd%/*}"
+
+. "$cwd/git-rh-sh-functions"
+
+show_help()
+{
+	cat <<-EOF
+	Usage: $PROG [options] [range]
+
+	Options:
+	  --patch-version=NUM   Set patchset version (default '$patchver');
+	  --bugzilla=NUM        Set bugzilla number  (default '$bugnum');
+	  --brew=NUM            Set brew number      (default '$brewnum');
+	  --rhel-major=NUM      Set RHEL major number;
+	  --rhel-minor=NUM      Set RHEL minor number;
+	  -v, --verbose         Print a message for each action;
+	  -V, --version         Print program version and exit;
+	  -h, --help            Show this text and exit.
+
+	Report bugs to author.
+
+	EOF
+	exit $1
+}
+
+GETOPT_ALLOW_UNKNOWN=1
+TEMP=`getopt -n "$PROG" -o h,v,V -l bugzilla:,branch:,brew:,patch-version:,rhel-major:,rhel-minor:,dry-run,test,verbose,version,help,usage -- "$@"` ||
+	show_usage
+eval "set -- $TEMP"
+
+RH_TEST=
+while :; do
+	case "${1-}" in
+		--bugzilla) shift
+			bugnum="$1"
+			;;
+		--brew) shift
+			brewnum="$1"
+			;;
+		--patch-version) shift
+			patchver="$1"
+			;;
+		--rhel-major) shift
+			major="$1"
+			;;
+		--rhel-minor) shift
+			minor="$1"
+			;;
+		--test|--dry-run)
+			RH_TEST=1
+			;;
+		-b|--branch) shift
+			branch="$1"
+			;;
+		-v|--verbose)
+			verbose=-v
+			;;
+		-V|--version)
+			print_version
+			;;
+		-h|--help|--usage)
+			show_help
+			;;
+		--) shift
+			break
+			;;
+	esac
+	shift
+done
+
+chdir_to_toplevel
+find_patchset "$@"
+set_distrib
+
+verbose "$distrib"
+
+if [ -n "$RH_TEST" ]; then
+	show_patchset
+	exit 0
+fi
+
+[ "$#" != 0 ] ||
+	set -- "$base_commit.."
+
+set -- ${patchver:+-v "$patchver"} --subject-prefix "$distrib BZ $bugnum PATCH" "$@"
+
+args='-N'
+[ "$num" = 1 ] || args='--cover-letter -n'
+
+workdir="PATCHSET-$distrib-BZ-$bugnum-v$patchver"
+
+mkdir -p -- "$workdir"
+find "$workdir" -mindepth 1 -delete
+
+git format-patch $args "$@" -o "$workdir" |
+while read -r fn; do
+	sed -i -e '0,/^---$/ {
+			s/'"$def_bugnum"'/'"$bugnum"'/g;
+			s/'"$def_brewnum"'/'"$brewnum"'/g;
+	}' -- "$fn"
+	name="${fn##*/}"
+	printf -- '%s\n' "$name"
+done
+
+foreach_patch()
+{
+	[ -x "$1" ] ||
+		return 1
+	find "$workdir" -type f -name '*.patch' |
+		grep -Ev '/v[0-9]+-0000-' |
+		xargs -r "$@"
+}
+
+if foreach_patch redhat/scripts/rh_get_maintainer.pl > "$workdir/CC"; then
+	sort -uo "$workdir/CC" "$workdir/CC"
+	exit 0
+fi
+
+if foreach_patch scripts/get_maintainer.pl --no-rolestats > "$workdir/CC"; then
+	sort -uo "$workdir/CC" "$workdir/CC"
+	exit 0
+fi
+
+fatal "unable to create CC list"

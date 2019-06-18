@@ -1,0 +1,113 @@
+#!/bin/sh -efu
+
+. shell-error
+. shell-args
+. shell-git-config
+. shell-getopt
+
+cwd="$(readlink -ev "$0")"
+cwd="${cwd%/*}"
+
+. "$cwd/git-rh-sh-functions"
+
+show_help()
+{
+	cat <<-EOF
+	Usage: $PROG [options]
+	   or: $PROG name [value]
+	   or: $PROG --add name value
+	   or: $PROG --replace-all name value
+	   or: $PROG --get name
+	   or: $PROG --get-all name
+	   or: $PROG --unset name
+	   or: $PROG --unset-all name
+
+	Options:
+	  -v, --verbose    Print a message for each action;
+	  -V, --version    Print program version and exit;
+	  -h, --help       Show this text and exit.
+
+	Report bugs to author.
+
+	EOF
+	exit
+}
+
+git_config=
+git_dir="$(git rev-parse --git-dir)"
+
+[ ! -e "$git_dir/config" ] ||
+	git_config="$git_dir/config"
+
+[ -n "$git_config" ] ||
+	[ ! -e "$HOME/.gitconfig" ] ||
+	git_config="$HOME/.gitconfig"
+
+[ -n "$git_config" ] ||
+	fatal "git config not found"
+
+TEMP=`getopt -n "$PROG" -o h,v,V -l add,get,get-all,unset,unset-all,replace-all,verbose,version,help,usage -- "$@"` ||
+	show_usage
+eval "set -- $TEMP"
+
+mode=
+while :; do
+	case "${1-}" in
+		--add|--get|--get-all|--unset|--unset-all|--replace-all)
+			mode="${1#--}"
+			;;
+		-v|--verbose)
+			verbose=-v
+			;;
+		-V|--version)
+			print_version
+			;;
+		-h|--help|--usage)
+			show_help
+			;;
+		--) shift
+			break
+			;;
+	esac
+	shift
+done
+
+if [ -z "$mode" ]; then
+	case "$#" in
+		1) mode='get' ;;
+		2) mode='replace-all' ;;
+	esac
+fi
+
+case "$mode" in
+	'add')
+		[ "$#" = 2 ] ||
+			show_usage "wrong number of arguments, should be 2"
+		git_config_append "$git_config" "redhat.${1#redhat.}" "$2"
+		;;
+	'get')
+		var=
+		git_config_get var "$git_config" "redhat.${1#redhat.}"
+		echo "$var"
+		;;
+	'get-all')
+		git_config_list "$git_config" "redhat.${1#redhat.}"
+		;;
+	'unset')
+		count=0
+		git_config_count count "$git_config" "redhat.${1#redhat.}"
+		[ "$count" != 0 ] ||
+			exit 0
+		[ "$count" = 1 ] ||
+			fatal "redhat.${1#redhat.} has multiple values"
+		git_config_unset "$git_config" "redhat.${1#redhat.}" "${2-}"
+		;;
+	'unset-all')
+		git_config_unset "$git_config" "redhat.${1#redhat.}"
+		;;
+	'replace-all')
+		[ "$#" = 2 ] ||
+			show_usage "wrong number of arguments, should be 2"
+		git_config_set "$git_config" "redhat.${1#redhat.}" "$2"
+		;;
+esac

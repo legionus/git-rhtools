@@ -1,0 +1,123 @@
+#!/bin/sh -efu
+
+. shell-error
+. shell-args
+. shell-getopt
+
+cwd="$(readlink -ev "$0")"
+cwd="${cwd%/*}"
+
+. "$cwd/git-rh-sh-functions"
+
+show_help()
+{
+	cat <<-EOF
+	Usage: $PROG [options] [PATCHSET-DIR]
+
+	Options:
+	  -v, --verbose         Print a message for each action;
+	  -V, --version         Print program version and exit;
+	  -h, --help            Show this text and exit.
+
+	Report bugs to author.
+
+	EOF
+	exit $1
+}
+
+TEMP=`getopt -n "$PROG" -o h,v,V -l version,help,usage -- "$@"` ||
+	show_usage
+eval "set -- $TEMP"
+
+while :; do
+	case "${1-}" in
+		-V|--version)
+			print_version
+			;;
+		-h|--help|--usage)
+			show_help
+			;;
+		--) shift
+			break
+			;;
+	esac
+	shift
+done
+
+patchset_dir="${1:-$PWD}"
+
+rc=0
+
+tags="$(
+	find "$patchset_dir" -type f -name '*.patch' |
+	while read -r fn; do
+		formail -X Subject: < "$fn" |
+			tr '\n' ' ' |
+			sed -n -r \
+				-e 's#^Subject:[[:space:]]+\[([^]]*)][[:space:]]+.*$#\1#' \
+				-e 's#(^| )[0-9]+/[0-9]+( |$)##' \
+				-e 'p'
+		printf '\n'
+	done |
+		sort -u
+)"
+
+case "$(printf '%s\n' "$tags" |wc -l)" in
+	0)
+		message "tags not found"
+		rc=1
+		;;
+	1)
+		;;
+	*)
+		message "tags are different:"
+		printf '%s\n' "$tags"
+		rc=1
+		;;
+esac
+
+if printf '%s\n' "$tags" | grep -qsF -e "$def_distrib"; then
+	message "distribution not specified"
+	rc=1
+fi
+
+if printf '%s\n' "$tags" | grep -qsF -e "$def_bugnum"; then
+	message "bugzilla number not specified"
+	rc=1
+fi
+
+if ! printf '%s\n' "$tags" | grep -qsE -e '(PATCH )?v?[0-9]( |$)'; then
+	message "distribution not specified"
+	rc=1
+fi
+
+brew_builds="$(
+	find "$patchset_dir" -type f -name '*.patch' \
+		-execdir grep -hF -e "$brew_host"'/brew/taskinfo?taskID=' '{}' '+' |
+		sort -u
+)"
+
+case "$(printf '%s\n' "$brew_builds" |wc -l)" in
+	0)
+		message "brew build not found"
+		rc=1
+		;;
+	1)
+		;;
+	*)
+		message "several brew builds are found in one patchset which is wrong"
+		printf '%s\n' "$brew_builds" |
+			sed -n -e 's/^.*?taskID=//p' |
+		while read -r brew_id; do
+			[ "${prev_brew_id-}" = "$brew_id" ] ||
+				printf 'Brew build %-20s in %-3s patche(s)\n' "$brew_id" "$(grep -rlF -e "$brew_host"'/brew/taskinfo?taskID='"$brew_id" "$patchset_dir" |wc -l)"
+			prev_brew_id="$brew_id"
+		done
+		rc=1
+		;;
+esac
+
+[ "$rc" = 0 ] ||
+	message "$(format_message "$COLOR_BRIGHT_RED" "invalid patchset")"
+
+exit $rc

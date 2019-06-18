@@ -1,0 +1,148 @@
+#!/bin/sh
+
+if [ -z "${__git_rh_sh_functions-}" ]; then
+__git_rh_sh_functions=1
+
+. shell-error
+
+def_distrib='RHEL???'
+def_bugnum='@RH-BUGZILLA-ID@'
+def_brewnum='@RH-BREW-ID@'
+
+patchver=1
+bugnum="$def_bugnum"
+brewnum="$def_brewnum"
+brew_host='https://brewweb.engineering.redhat.com'
+
+is_tty=
+[ ! -t 1 ] || is_tty=1
+
+COLOR_YELLOW=$(printf '\033[33m')
+COLOR_MAGENTA=$(printf '\033[35m')
+COLOR_NORMAL=$(printf '\033[39;49m\033[0;10m')
+
+COLOR_BRIGHT_BLACK="$(printf '\033[90m')"
+COLOR_BRIGHT_RED="$(printf '\033[91m')"
+COLOR_BRIGHT_GREEN="$(printf '\033[92m')"
+COLOR_BRIGHT_YELLOW="$(printf '\033[93m')"
+COLOR_BRIGHT_BLUE="$(printf '\033[94m')"
+
+print_version()
+{
+	cat <<-EOF
+	$PROG version 0.0.1
+	Written by Alexey Gladkov <gladkov.alexey@gmail.com>
+
+	Copyright (C) 2019  Alexey Gladkov <gladkov.alexey@gmail.com>
+	This is free software; see the source for copying conditions.  There is NO
+	warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+	EOF
+	exit
+}
+
+format_message()
+{
+	if [ -n "$is_tty" ]; then
+		echo -e "$1$2$COLOR_NORMAL"
+		return
+	fi
+	printf '%s\n' "$2"
+}
+
+chdir_to_toplevel()
+{
+	local cdup
+	cdup="$(git rev-parse --show-cdup)"
+	[ -z "$cdup" ] ||
+		cd "$cdup" ||
+			fatal "Cannot chdir to $cdup, the toplevel of the working tree"
+}
+
+distrib="$def_distrib"
+major=
+minor=
+set_distrib()
+{
+	local fn
+
+	for fn in Makefile.rhelver Makefile; do
+		[ -s "$fn" ] ||
+			continue
+		[ -n "$major" ] || major="$(sed -n -e 's/^RHEL_MAJOR[[:space:]]*=[[:space:]]*\(.*\)[[:space:]]*$/\1/p' "$fn")"
+		[ -n "$minor" ] || minor="$(sed -n -e 's/^RHEL_MINOR[[:space:]]*=[[:space:]]*\(.*\)[[:space:]]*$/\1/p' "$fn")"
+	done
+
+	if [ -n "$major$minor" ]; then
+		distrib="$({
+			git config redhat.distrib  2>/dev/null ||
+				echo 'RHEL@major@.@minor@'
+			} | sed \
+				-e "s|@major@|$major|g" \
+				-e "s|@minor@|$minor|g"
+		)"
+	fi
+}
+
+show_commit()
+{
+	git log -1 --format='%H' "$@"
+}
+
+show_abbrev()
+{
+	git log -1 --format='%h' "$@"
+}
+
+tag=
+branch=
+head_commit=
+base_commit=
+last_commit=
+num=
+find_patchset()
+{
+	if [ -z "$branch" ]; then
+		branch="$(git branch --points-at HEAD --format '%(refname:lstrip=2)')"
+
+		[ -n "${branch##*
+*}" ] ||
+		fatal "Bad current branch:
+
+$branch
+"
+	fi
+
+	[ -n "$tag" ] ||
+		tag="$(git describe --tags --abbrev=0)"
+
+	[ "$#" != 0 ] ||
+		set -- "$tag..$branch"
+
+	head_commit="$(show_commit HEAD)"
+	base_commit="$(show_commit "$tag")"
+	last_commit="$(show_commit ${RH_SKIP:+--skip=$RH_SKIP} "$@")"
+
+	num="$(git log --format='%h' "$@" |wc -l)"
+}
+
+show_patchset()
+{
+	if [ -n "$verbose" ]; then
+		printf '\n'
+		verbose "The list of commits to be processed:"
+		git log --color=always --format=oneline "$tag".."$last_commit" |cat
+	fi
+
+	printf '\n'
+	message "Distrib      : $distrib"
+	message "Local branch : $branch"
+	message "Base tag     : $tag"
+	message "Commits      : $num"
+	printf '\n'
+
+	message "Last commit  : $(show_abbrev $last_commit)"
+	message "Base commit  : $(show_abbrev $base_commit)"
+	printf '\n'
+}
+
+fi # __git_rh_sh_functions

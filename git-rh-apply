@@ -1,0 +1,183 @@
+#!/bin/sh -efu
+
+. shell-error
+. shell-args
+
+show_help() {
+	printf 'Usage: %s GIT-FORMAT-PATCH-FILE\n' "$PROG"
+	exit
+}
+
+chdir_to_toplevel()
+{
+	local cdup
+	cdup="$(git rev-parse --show-cdup)"
+	[ -z "$cdup" ] ||
+		cd "$cdup" ||
+			fatal "Cannot chdir to $cdup, the toplevel of the working tree"
+}
+
+show_hint()
+{
+	printf 'You can do:\n'
+	printf '  (use "git rh-apply --abort" to stop backporting)\n'
+	printf '  (use "git rh-apply --continue" to continue backporting)\n'
+}
+
+TEMP=`getopt -n "$PROG" -o v,h -l abort,continue,bugzilla:,brew:,verbose,help,usage -- "$@"` ||
+	show_usage
+eval "set -- $TEMP"
+
+mode=
+bugnum='???'
+brewnum='???'
+
+while :; do
+	case "${1-}" in
+		--bugzilla)      shift; bugnum="$1"    ;;
+		--brew)          shift; brewnum="$1"   ;;
+		--patch-version) shift; patch_ver="$1" ;;
+		--abort)    mode='abort'    ;;
+		--continue) mode='continue' ;;
+		-v|--verbose)
+			verbose=-v
+			;;
+		-h|--help|--usage)
+			show_help
+			;;
+		--) shift
+			break
+			;;
+	esac
+	shift
+done
+
+cwd="$(readlink -ev .)"
+chdir_to_toplevel
+
+if [ -z "$mode" ]; then
+	if [ "$#" -ne 1 ]; then
+		message "More arguments required"
+		show_usage 1
+	fi
+
+	filename="$(readlink -ev "$1")"
+	shift
+fi
+
+workdir="$PWD/.git/.apply"
+
+if [ -d "$workdir" ]; then
+	filename=
+	. "$workdir/state"
+fi
+
+case "$mode" in
+	'')
+		[ ! -d "$workdir" ] ||
+			fatal "You are already in the process of backporting the $filename"
+		;;
+	'abort')
+		[ -d "$workdir" ] ||
+			fatal 'You are not backporting anything.'
+		exec rm -rf -- "$workdir"
+		;;
+	'continue')
+		[ -d "$workdir" ] ||
+			fatal 'You are not backporting anything.'
+		;;
+	*)
+		fatal "Unknown mode $mode."
+		;;
+esac
+
+if [ -z "$mode" ]; then
+	out="$(git diff-index --cached --name-only HEAD)"
+	if [ -n "$out" ]; then
+		printf '%s\n' "$out"
+		fatal "Changed files found in the index."
+	fi
+
+	out="$(git diff --name-only &&
+	       git ls-files --directory --others --exclude-per-directory=.gitignore)"
+	if [ -n "$out" ]; then
+		printf '%s\n' "$out"
+		fatal "Untracked or modified files found."
+	fi
+
+	mkdir -p -- "$workdir"
+
+	printf '%s\n' \
+		"filename='$filename'" \
+		> "$workdir/state"
+fi
+
+line=
+read -r line < "$filename"
+
+commit='<SHA????>'
+if [ -z "${line##From *}" ]; then
+	commit="${line##From *}"
+	commit="${commit%% *}"
+fi
+
+git mailinfo "$workdir/msg" "$workdir/patch" < "$filename" > "$workdir/info"
+
+c_author='' c_email='' c_subject='' c_date=''
+
+while read -r k v; do
+	case "$k" in
+		Author:)  c_author="$v"  ;;
+		Email:)   c_email="$v"   ;;
+		Subject:) c_subject="$v" ;;
+		Date:)    c_date="$v"    ;;
+	esac
+done < "$workdir/info"
+
+if [ -z "$mode" ]; then
+	patch -p1 < "$workdir/patch"
+
+	lsdiff --strip=1 -s "$workdir/patch" |
+	while read -r k v; do
+		sub=
+		case "$k" in
+			'!'|'+') sub=add ;;
+			'-')     sub=rm  ;;
+		esac
+		git "$sub" -f "$v"
+	done
+fi
+
+if [ ! -e "$workdir/commit" ]; then
+	cat > "$workdir/commit" <<-EOF
+	$c_subject
+
+	Bugzilla: $bugnum
+	Build info: $brew_host/brew/taskinfo?taskID=$brewnum
+	Tested: selftests on x86 by me
+	Upstream Status: Merged
+
+	commit $commit
+	Author: "$c_author" <$c_email>
+	Date: $c_date
+
+	$c_subject
+
+	EOF
+	sed -e 's/[^[:space:]].*/    &/' < "$workdir/msg" >> "$workdir/commit"
+fi
+
+if ! git diff-index --cached --name-only HEAD | grep -qsc '^.'; then
+	printf '%s\n' \
+		'backport in progress' \
+		'No files to commit.'  \
+		''
+	show_hint
+	exit 1
+fi
+
+git commit -q -s --file="$workdir/commit"
+
+printf 'Applied %s\n' "$filename"
+
+rm -rf -- "$workdir"

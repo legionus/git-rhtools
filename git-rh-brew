@@ -1,0 +1,109 @@
+#!/bin/sh
+
+. shell-error
+. shell-args
+
+cwd="$(readlink -ev "$0")"
+cwd="${cwd%/*}"
+
+. "$cwd/git-rh-sh-functions"
+
+export LANG=C
+
+show_help()
+{
+	cat <<-EOF
+	Usage: $PROG [options] [make-rh-target]
+
+	Options:
+	  --test
+	  --dry-run        Don't do nothing;
+	  --skip=NUM       Skip NUM commits before starting to show the commit output;
+	  --branch=NAME    Set branch name;
+	  -v, --verbose    Print a message for each action;
+	  -V, --version    Print program version and exit;
+	  -h, --help       Show this text and exit.
+
+	Report bugs to author.
+
+	EOF
+	exit
+}
+
+write_localversion()
+{
+	printf '%s\n' "$1" > "localversion"
+	verbose "The localversion now is '$1'"
+}
+
+TEMP=`getopt -n "$PROG" -o b:,h,v,V -l branch:,skip:,test,dry-run,verbose,version,help,usage -- "$@"` ||
+	show_usage
+eval "set -- $TEMP"
+
+branch=
+mode=
+while :; do
+	case "${1-}" in
+		--test|--dry-run)
+			RH_TEST=1
+			;;
+		-b|--branch) shift
+			branch="$1"
+			;;
+		--skip) shift
+			RH_SKIP="$1"
+			;;
+		-v|--verbose)
+			verbose=-v
+			;;
+		-V|--version)
+			print_version
+			;;
+		-h|--help|--usage)
+			show_help
+			;;
+		--) shift
+			break
+			;;
+	esac
+	shift
+done
+
+RH_TARGET="${1-}"
+
+cdup="$(git rev-parse --show-cdup)"
+[ -z "$cdup" ] ||
+	cd "$cdup" ||
+		fatal "Cannot chdir to $cdup, the toplevel of the working tree"
+
+[ -d redhat ] ||
+	fatal "this isnot redhat repository"
+
+find_patchset
+set_distrib
+
+write_localversion ".$num.g$(show_abbrev $head_commit)"
+
+{
+	user_name="$(git config user.name  2>/dev/null ||:)"
+	user_mail="$(git config user.email 2>/dev/null ||:)"
+
+	printf 'From %s %s\n' "$head_commit" "$(date '+%a %b %d %H:%M:%S %Y')"
+	printf 'From: %s\n' "${user_name:+$user_name }<${user_mail:-$USER@localhost}>"
+	printf 'Date: %s\n' "$(date -R)"
+	printf 'Subject: Brew build\n'
+	printf '\n'
+	git log --format=oneline "$tag".."$last_commit"
+	printf '%s\n' '---'
+	git diff -p --stat "$tag".."$last_commit"
+
+} > "redhat/linux-kernel-test.patch"
+
+show_patchset
+
+if [ -z "${RH_TEST-}" ]; then
+	find redhat     -type f   -name 'linux-*.tar.xz' -delete
+	find redhat/rpm -type f ! -name '.gitignore'     -delete
+fi
+
+${RH_TEST:+echo} make ${RH_TARGET:-rh-brew} GITID="$base_commit"
