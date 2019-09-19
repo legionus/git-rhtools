@@ -94,7 +94,7 @@ set -- ${patchver:+-v "$patchver"} --subject-prefix "$distrib BZ $bugnum PATCH" 
 args='-N'
 [ "$num" = 1 ] || args='--cover-letter -n'
 
-workdir="PATCHSET-$distrib-BZ-$bugnum-v$patchver"
+workdir="patches/PATCHSET-$distrib-BZ-$bugnum-v$patchver"
 
 mkdir -p -- "$workdir"
 find "$workdir" -mindepth 1 -delete
