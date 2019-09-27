@@ -1,10 +1,13 @@
-#!/bin/sh
-
-. shell-error
-. shell-args
+#!/bin/sh -efu
 
 cwd="$(readlink -ev "$0")"
 cwd="${cwd%/*}"
+
+(. shell-version) >/dev/null 2>&1 ||
+	export PATH="$cwd/libshell:${PATH#$cwd/libshell:}"
+
+. shell-error
+. shell-args
 
 . "$cwd/git-rh-sh-functions"
 

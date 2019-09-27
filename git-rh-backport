@@ -3,6 +3,9 @@
 cwd="$(readlink -ev "$0")"
 cwd="${cwd%/*}"
 
+(. shell-version) >/dev/null 2>&1 ||
+	export PATH="$cwd/libshell:${PATH#$cwd/libshell:}"
+
 . "$cwd/git-rh-sh-functions"
 
 show_help()
